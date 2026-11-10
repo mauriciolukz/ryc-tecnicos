@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Recepción de Vehículo RYC</title>
+<link rel="icon" href="https://ryc-soluciones-nicaragua.com/imagenes/cropped-cropped-logo-editable-192x192.png">
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body class="bg-light">
+<nav class="navbar navbar-dark bg-dark mb-3"><div class="container"><span class="navbar-brand mb-0 fw-bold d-flex align-items-center gap-2" style="font-size:1rem"><img src="https://ryc-soluciones-nicaragua.com/imagenes/cropped-cropped-logo-editable-192x192.png" alt="RYC" width="44" height="44" class="rounded bg-white p-1" onerror="this.style.display='none'">RECEPCIÓN DE VEHÍCULO RYC</span></div></nav>
+<main class="container pb-5" style="max-width:720px" id="app"></main>
+
+<script>
+const NUM = '50583927405'; // solo se usa si el celular no soporta compartir con fotos
+const INST = ['Cámara', 'GPS', 'Radio', 'Espejo retrovisores', 'Espejo manual a retráctil'];
+const TECNICOS = ['José', 'Julio'];
+// Checklist de salida por tipo de instalación (los vacíos se llenan más adelante)
+const CHECK_INST = {
+  'Cámara': [
+    { t: '1. Calidad de la instalación', items: [
+      'Equipo instalado y fijado correctamente', 'Cables ocultos y asegurados', 'Molduras y tablero ensamblados correctamente',
+      'Sin piezas sueltas ni tornillos faltantes', 'Sin rayones o daños nuevos en áreas intervenidas', 'Área de trabajo limpia'] },
+    { t: '2. Pruebas de funcionamiento', items: [
+      'Equipo instalado enciende y funciona', 'Cámaras muestran imagen correctamente, si aplica', 'Grabación y reproducción verificadas, si aplica',
+      'Sensores y alertas funcionan, si aplica', 'Radio, pantalla o GPS funcionan, si aplica',
+      'Controles y funciones originales del vehículo comprobados', 'Sin nuevas alertas o fallas en el tablero'] },
+    { t: '3. Configuración y entrega', op: ['Sí', 'No'], items: [
+      'Formatear memoria', 'Equipo queda grabando', 'Probar conexión app', 'Ajustar hora', 'Revisar kit de instalación',
+      'Ajustar ángulos de cámara', 'Conectarse y revisar funcionalidades', 'Expliqué al cliente las funcionalidades'] }
+  ],
+  'GPS': [], 'Radio': [], 'Espejo retrovisores': [], 'Espejo manual a retráctil': []
+};
+// Grupos de revisión del vehículo: aplican en ENTRADA y en SALIDA, cada uno con sus propias fotos
+const GRUPOS = [
+  { t: '1. Iluminación', op: ['Sí', 'No'], items: ['Luces frontales', 'Luces laterales', 'Luces traseras', 'Luces de retroceso', 'Luces interiores'] },
+  { t: '2. Sistemas eléctricos', op: ['Sí', 'No'], items: ['Radio y parlantes', 'Aire acondicionado', 'Vidrios eléctricos', 'Cierre centralizado', 'Alarma del vehículo'] },
+  { t: '3. Revisión eléctrica y evidencias', op: ['Sí', 'No'], items: ['Test de batería (foto del voltaje)', 'Tablero sin alarmas', 'Foto de caja de fusibles', 'Foto antes de realizar conexiones'] },
+  { t: 'Revisión de tablero y molduras', op: ['Sí', 'No'], items: ['Tablero y consola sin daños', 'Tapas y molduras completas', 'Piezas sin quebraduras', 'Grapas y tornillos completos', 'Piezas correctamente ajustadas'] }
+];
+const OP = ['Sí', 'Falla', 'N/A'];
+const seccionesDe = inst => [...GRUPOS, ...(inst || []).flatMap(i => CHECK_INST[i] || [])];
+let SECS = [];
+const $ = s => document.querySelector(s);
+const fmt = iso => new Date(iso).toLocaleString('es-NI', { dateStyle: 'short', timeStyle: 'short' });
+const esc = s => (s || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+let orders = [], draft = null, tmr;
+
+/* ---------- Almacenamiento (IndexedDB) ---------- */
+const db = new Promise((res, rej) => {
+  const r = indexedDB.open('taller', 1);
+  r.onupgradeneeded = () => r.result.createObjectStore('kv');
+  r.onsuccess = () => res(r.result); r.onerror = rej;
+});
+const kvGet = k => db.then(d => new Promise(res => { const q = d.transaction('kv').objectStore('kv').get(k); q.onsuccess = () => res(q.result); q.onerror = () => res(); }));
+const kvSet = (k, v) => db.then(d => new Promise(res => { const t = d.transaction('kv', 'readwrite'); t.objectStore('kv').put(v, k); t.oncomplete = res; t.onerror = res; }));
+// El borrador se guarda solo: si el navegador recarga, no se pierde nada
+const saveDraft = () => { clearTimeout(tmr); tmr = setTimeout(() => kvSet('draft', draft), 300); };
+
+// Las órdenes con salida se eliminan 24 h después de la salida; las pendientes nunca
+async function limpiar() {
+  const n = orders.length;
+  orders = orders.filter(o => !o.salida || Date.now() - new Date(o.salida) < 864e5);
+  if (orders.length === n) return false;
+  await kvSet('orders', orders); return true;
+}
+
+/* ---------- Imágenes ---------- */
+function toJpeg(src, w, h, max = 1200) {
+  const k = Math.min(1, max / Math.max(w, h)), c = document.createElement('canvas');
+  c.width = Math.round(w * k); c.height = Math.round(h * k);
+  c.getContext('2d').drawImage(src, 0, 0, c.width, c.height);
+  return c.toDataURL('image/jpeg', 0.75);
+}
+const comprimir = f => new Promise(res => {
+  const i = new Image();
+  i.onload = () => { res(toJpeg(i, i.naturalWidth, i.naturalHeight)); URL.revokeObjectURL(i.src); };
+  i.src = URL.createObjectURL(f);
+});
+function galeria(multi, cb) {
+  const i = document.createElement('input');
+  i.type = 'file'; i.accept = 'image/*'; i.multiple = multi;
+  i.onchange = async () => { for (const f of i.files) cb(await comprimir(f)); };
+  i.click();
+}
+
+// Cámara dentro de la app: se toman varias fotos seguidas sin salir de la página
+async function camara(cb, single) {
+  let st;
+  try {
+    st = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false });
+  } catch (e) { // respaldo: cámara nativa del celular
+    const i = document.createElement('input');
+    i.type = 'file'; i.accept = 'image/*'; i.capture = 'environment';
+    i.onchange = async () => { if (i.files[0]) cb(await comprimir(i.files[0])); };
+    return i.click();
+  }
+  const ov = document.createElement('div');
+  ov.className = 'position-fixed top-0 start-0 w-100 bg-black d-flex flex-column';
+  ov.style.cssText = 'z-index:2000;height:100dvh;height:100vh;height:100dvh';
+  ov.innerHTML = `<video autoplay playsinline muted class="w-100" style="flex:1;min-height:0;object-fit:contain"></video>
+    <div class="d-flex justify-content-between align-items-center p-3">
+      <button class="btn btn-light" id="cx">Listo</button>
+      <button id="cs" class="btn btn-light rounded-circle" style="width:72px;height:72px;border:6px solid #888"></button>
+      <span class="text-white fs-5" id="cn" style="min-width:60px;text-align:right"></span>
+    </div>`;
+  document.body.appendChild(ov);
+  const v = ov.querySelector('video'); v.srcObject = st;
+  let n = 0;
+  const cerrar = () => { st.getTracks().forEach(t => t.stop()); ov.remove(); };
+  ov.querySelector('#cx').onclick = cerrar;
+  ov.querySelector('#cs').onclick = () => {
+    if (!v.videoWidth) return;
+    cb(toJpeg(v, v.videoWidth, v.videoHeight));
+    ov.querySelector('#cn').textContent = ++n + ' 📷';
+    ov.style.opacity = .3; setTimeout(() => ov.style.opacity = 1, 90);
+    if (single) cerrar();
+  };
+}
+
+// Editor: el dedo funciona como marcador sobre la foto
+function editar(src, cb) {
+  const ov = document.createElement('div');
+  ov.className = 'position-fixed top-0 start-0 w-100 bg-dark';
+  ov.style.cssText = 'z-index:2000;height:100dvh;touch-action:none;user-select:none;-webkit-user-select:none';
+  ov.innerHTML = `<div class="d-flex gap-2 p-2 align-items-center" style="height:56px">
+      <button class="btn rounded-circle sw" data-c="#ff1a1a" style="width:34px;height:34px;background:#ff1a1a;border:3px solid #fff"></button>
+      <button class="btn rounded-circle sw" data-c="#ffe600" style="width:34px;height:34px;background:#ffe600;border:3px solid #555"></button>
+      <button class="btn btn-light btn-sm ms-2" id="eu">↩ Deshacer</button>
+      <button class="btn btn-light btn-sm" id="ec">🗑</button>
+      <span class="flex-grow-1"></span>
+      <button class="btn btn-outline-light btn-sm" id="ex">✕</button>
+      <button class="btn btn-success btn-sm" id="eg">Guardar</button></div>
+    <div style="height:calc(100dvh - 56px);display:flex;align-items:center;justify-content:center"><canvas id="cv" style="touch-action:none"></canvas></div>`;
+  document.body.appendChild(ov);
+  const cv = ov.querySelector('#cv'), ctx = cv.getContext('2d'), img = new Image();
+  let strokes = [], cur = null, color = '#ff1a1a';
+  const brush = c => { ctx.strokeStyle = c; ctx.lineWidth = Math.max(8, cv.width / 45); ctx.lineCap = ctx.lineJoin = 'round'; };
+  const redraw = () => {
+    ctx.drawImage(img, 0, 0);
+    strokes.forEach(s => { brush(s.c); ctx.beginPath(); s.p.forEach((q, i) => i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1])); ctx.stroke(); });
+  };
+  img.onload = () => {
+    cv.width = img.naturalWidth; cv.height = img.naturalHeight;
+    const k = Math.min(innerWidth / cv.width, (innerHeight - 56) / cv.height);
+    cv.style.width = cv.width * k + 'px'; cv.style.height = cv.height * k + 'px';
+    redraw();
+  };
+  img.src = src;
+  const pos = e => { const r = cv.getBoundingClientRect(); return [(e.clientX - r.left) * cv.width / r.width, (e.clientY - r.top) * cv.height / r.height]; };
+  cv.onpointerdown = e => {
+    e.preventDefault(); const p = pos(e);
+    cur = { c: color, p: [p] }; strokes.push(cur);
+    brush(color); ctx.beginPath(); ctx.moveTo(p[0], p[1]); ctx.lineTo(p[0], p[1]); ctx.stroke();
+    cv.setPointerCapture(e.pointerId);
+  };
+  cv.onpointermove = e => {
+    if (!cur) return; e.preventDefault();
+    const a = cur.p[cur.p.length - 1], p = pos(e); cur.p.push(p);
+    brush(cur.c); ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(p[0], p[1]); ctx.stroke();
+  };
+  cv.onpointerup = cv.onpointercancel = () => cur = null;
+  ov.addEventListener('touchmove', e => e.preventDefault(), { passive: false });
+  ov.querySelectorAll('.sw').forEach(b => b.onclick = () => {
+    color = b.dataset.c; ov.querySelectorAll('.sw').forEach(x => x.style.borderColor = '#555'); b.style.borderColor = '#fff';
+  });
+  ov.querySelector('#eu').onclick = () => { strokes.pop(); redraw(); };
+  ov.querySelector('#ec').onclick = () => { strokes = []; redraw(); };
+  ov.querySelector('#ex').onclick = () => ov.remove();
+  ov.querySelector('#eg').onclick = () => { cb(cv.toDataURL('image/jpeg', 0.85)); ov.remove(); };
+}
+
+/* ---------- Lista ---------- */
+function lista() {
+  $('#app').innerHTML = `
+    <button class="btn btn-primary btn-lg w-100 mb-3" onclick="abrirForm('entrada')">+ Nueva entrada</button>
+    ${orders.length ? '' : '<p class="text-muted text-center">No hay órdenes todavía.</p>'}
+    ${orders.slice().reverse().map(o => `
+      <div class="card mb-2"><div class="card-body">
+        <div class="d-flex gap-3">
+          ${o.placaFoto ? `<img src="${o.placaFoto}" style="width:130px;height:80px;object-fit:cover" class="rounded border">` : ''}
+          <div class="flex-grow-1">
+            <h5 class="mb-0 text-uppercase">${esc(o.placa) || 'Vehículo'}</h5>
+            <div class="small text-muted">Entrada ${fmt(o.entrada)}${o.tecnico ? ' · ' + o.tecnico : ''}</div>${o.salida ? `<div class="small text-muted">Salida ${fmt(o.salida)} · se elimina a las 24 h</div>` : ''}
+          </div>
+          <span class="badge ${o.salida ? 'bg-success' : 'bg-warning text-dark'} align-self-start">${o.salida ? 'Finalizado' : 'En proceso'}</span>
+        </div>
+        <div class="d-flex gap-2 flex-wrap mt-2">
+          ${o.salida ? '' : `<button class="btn btn-sm btn-success" onclick="abrirForm('salida','${o.id}')">Registrar salida</button>`}
+          <button class="btn btn-sm btn-outline-secondary" onclick="enviar('${o.id}','entrada')">Reenviar entrada 📷</button>
+          ${o.salida ? `<button class="btn btn-sm btn-outline-secondary" onclick="enviar('${o.id}','salida')">Reenviar salida 📷</button>` : ''}
+          <button class="btn btn-sm btn-outline-danger" onclick="borrar('${o.id}')">Eliminar</button>
+        </div>
+      </div></div>`).join('')}`;
+}
+function borrar(id) {
+  if (confirm('¿Eliminar esta orden y sus fotos?')) { orders = orders.filter(o => o.id !== id); kvSet('orders', orders); lista(); }
+}
+
+/* ---------- Formulario ---------- */
+function abrirForm(modo, id) {
+  draft = { modo, id, placaFoto: null, install: [], obs: '', tecnico: '', cl: {}, gf: {} };
+  saveDraft(); renderForm();
+}
+function volver() {
+  const nf = Object.values(draft.gf || {}).flat().length + (draft.placaFoto ? 1 : 0);
+  if (nf && !confirm('Se perderán las fotos de este formulario. ¿Salir?')) return;
+  clearTimeout(tmr); draft = null; kvSet('draft', null); lista();
+}
+function renderForm() {
+  const ent = draft.modo === 'entrada', o = ent ? null : orders.find(x => x.id === draft.id);
+  if (!ent && !o) { draft = null; kvSet('draft', null); return lista(); }
+  draft.cl = draft.cl || {}; draft.gf = draft.gf || {};
+  SECS = seccionesDe(ent ? null : o.install);
+  let n = 0;
+  const clHtml = SECS.map((sec, g) => `<div class="card card-body mb-3"><h6 class="fw-bold mb-2">${esc(sec.t)}</h6>` +
+    sec.items.map(it => {
+      const k = ++n, key = sec.t + '|' + it;
+      return `<div class="mb-2"><div class="small fw-semibold">${esc(it)}</div>` + (sec.op || OP).map((v, j) =>
+        `<div class="form-check form-check-inline"><input class="form-check-input cl" type="radio" name="cl${k}" id="cl${k}_${j}" data-item="${esc(key)}" value="${v}" ${draft.cl[key] === v ? 'checked' : ''}><label class="form-check-label" for="cl${k}_${j}">${v}</label></div>`).join('') + '</div>';
+    }).join('') +
+    `<div class="border-top pt-2 mt-2"><div class="small fw-bold mb-2">Fotos de este grupo (<span id="cn${g}">0</span>)</div>
+      <div class="d-flex gap-2 mb-2"><button class="btn btn-dark btn-sm flex-fill" id="fc${g}">📷 Tomar fotos</button><button class="btn btn-outline-dark btn-sm flex-fill" id="fg${g}">🖼️ Galería</button></div>
+      <div id="th${g}" class="d-flex flex-wrap gap-2"></div></div></div>`).join('');
+  $('#app').innerHTML = `
+    <button class="btn btn-link px-0" onclick="volver()">← Volver</button>
+    <h4 class="mb-3">${ent ? 'Recepción del vehículo' : 'Salida del vehículo'}</h4>
+    ${ent ? `
+    <div class="card card-body mb-3">
+      <label class="form-label fw-bold">Foto de la placa</label>
+      <div id="placaFoto" class="mb-2"></div>
+      <div class="d-flex gap-2">
+        <button class="btn btn-dark flex-fill" id="pc">📷 Foto de placa</button>
+        <button class="btn btn-outline-dark flex-fill" id="pg">🖼️ Galería</button>
+      </div>
+    </div>
+    <div class="card card-body mb-3">
+      <label class="form-label fw-bold">Técnico</label>
+      <div class="mb-3">${TECNICOS.map(t => `<div class="form-check form-check-inline"><input class="form-check-input tec" type="radio" name="tec" id="t_${t}" value="${t}" ${draft.tecnico === t ? 'checked' : ''}><label class="form-check-label" for="t_${t}">${t}</label></div>`).join('')}</div>
+      <label class="form-label fw-bold">Instalaciones a realizar</label>
+      ${INST.map((t, i) => `<div class="form-check"><input class="form-check-input inst" type="checkbox" id="i${i}" value="${t}" ${draft.install.includes(t) ? 'checked' : ''}><label class="form-check-label" for="i${i}">${t}</label></div>`).join('')}
+    </div>` : `
+    <div class="card card-body mb-3">
+      ${o.placaFoto ? `<img src="${o.placaFoto}" class="w-100 rounded border mb-2" style="max-height:40vh;object-fit:contain;background:#000">` : ''}
+      <p class="small text-muted mb-0">Instalaciones: ${o.install.join(', ') || 'ninguna'}</p>
+    </div>`}
+    ${clHtml}
+    <div class="card card-body mb-3">
+      <label class="form-label fw-bold">Observaciones <span class="text-danger">* obligatorio</span></label>
+      <textarea id="obs" class="form-control" rows="3"></textarea>
+    </div>
+    <button class="btn ${ent ? 'btn-primary' : 'btn-success'} btn-lg w-100" id="go">Guardar y enviar por WhatsApp</button>`;
+  $('#obs').value = draft.obs;
+  $('#obs').oninput = e => { draft.obs = e.target.value; saveDraft(); };
+  const add = g => u => { const t = SECS[g].t; (draft.gf[t] = draft.gf[t] || []).push(u); saveDraft(); thumbsG(g); };
+  SECS.forEach((_, g) => { $('#fc' + g).onclick = () => camara(add(g)); $('#fg' + g).onclick = () => galeria(true, add(g)); thumbsG(g); });
+  document.querySelectorAll('.cl').forEach(r => r.onchange = () => { draft.cl[r.dataset.item] = r.value; saveDraft(); });
+  if (ent) {
+    const setPlaca = u => { draft.placaFoto = u; saveDraft(); placaView(); };
+    $('#pc').onclick = () => camara(setPlaca, true);
+    $('#pg').onclick = () => galeria(false, setPlaca);
+    document.querySelectorAll('.tec').forEach(r => r.onchange = () => { draft.tecnico = r.value; saveDraft(); });
+    document.querySelectorAll('.inst').forEach(c => c.onchange = () => { draft.install = [...document.querySelectorAll('.inst:checked')].map(x => x.value); saveDraft(); });
+    placaView();
+  }
+  $('#go').onclick = guardarYEnviar;
+}
+function placaView() {
+  $('#placaFoto').innerHTML = draft.placaFoto ? `<div class="position-relative"><img src="${draft.placaFoto}" class="w-100 rounded border" style="max-height:60vh;object-fit:contain;background:#000">
+    <button class="btn btn-danger btn-sm position-absolute top-0 end-0 m-1" onclick="draft.placaFoto=null;saveDraft();placaView()">×</button></div>` : '';
+}
+function thumbsG(g) {
+  const L = draft.gf[SECS[g].t] || [];
+  $('#cn' + g).textContent = L.length;
+  $('#th' + g).innerHTML = L.map((f, i) => `<div class="position-relative">
+    <img src="${f}" onclick="editFoto(${g},${i})" style="width:100px;height:100px;object-fit:cover" class="rounded border">
+    <button class="btn btn-danger btn-sm position-absolute top-0 end-0 py-0 px-1" onclick="delFoto(${g},${i})">×</button>
+    <button class="btn btn-primary btn-sm position-absolute bottom-0 start-0 py-0 px-2" onclick="editFoto(${g},${i})">✏️ Rayar</button></div>`).join('');
+}
+const editFoto = (g, i) => { const L = draft.gf[SECS[g].t]; editar(L[i], u => { L[i] = u; saveDraft(); thumbsG(g); }); };
+const delFoto = (g, i) => { draft.gf[SECS[g].t].splice(i, 1); saveDraft(); thumbsG(g); };
+
+async function guardarYEnviar() {
+  if (!draft.obs.trim()) return alert('Las observaciones son obligatorias. Escribe cómo está el vehículo.');
+  const ent = draft.modo === 'entrada';
+  if (ent && !draft.placaFoto) return alert('Toma o adjunta la foto de la placa');
+  if (ent && !draft.tecnico) return alert('Selecciona el técnico');
+  let o = ent ? null : orders.find(x => x.id === draft.id);
+  const L = SECS.map(sec => ({ t: sec.t, fotos: draft.gf[sec.t] || [], items: sec.items.map(it => ({ item: it, r: draft.cl[sec.t + '|' + it] || null })) }));
+  const sin = L.flatMap(x => x.items).filter(x => !x.r).length;
+  if (sin && !confirm(`Faltan ${sin} puntos del checklist sin marcar. ¿Enviar de todos modos?`)) return;
+  if (ent) {
+    o = { id: Date.now().toString(36), placa: '', placaFoto: draft.placaFoto, tecnico: draft.tecnico, install: draft.install, obsIn: draft.obs, listasIn: L, entrada: new Date().toISOString() };
+    orders.push(o);
+  } else {
+    o.listas = L; o.obsOut = draft.obs; o.salida = new Date().toISOString();
+  }
+  clearTimeout(tmr); draft = null;
+  await Promise.all([kvSet('orders', orders), kvSet('draft', null)]);
+  enviar(o.id, ent ? 'entrada' : 'salida');
+}
+
+/* ---------- WhatsApp ---------- */
+const RES = { 'Sí': '✅ Sí', 'Falla': '❌ Falla', 'N/A': '➖ N/A', 'No': '❌ No' };
+// Resumen corto: cuenta los "Sí" y detalla solo lo que no es "Sí" (WhatsApp limita el largo del texto con fotos)
+function listasTxt(L) {
+  if (!L || !L.length) return '';
+  return '\n\n' + L.map(s => {
+    const si = s.items.filter(x => x.r === 'Sí').length;
+    return `*${s.t}* — ✅ ${si}/${s.items.length}` +
+      s.items.filter(x => x.r !== 'Sí').map(x => `\n• ${x.item}: ${RES[x.r] || '⚠️ sin marcar'}`).join('') +
+      (s.fotos.length ? `\n📷 ${s.fotos.length} foto(s)` : '');
+  }).join('\n\n');
+}
+function mensaje(o, tipo) {
+  const placa = o.placa || 'ver foto adjunta';
+  if (tipo === 'entrada')
+    return `*RECEPCIÓN RYC*\n*🚗 ENTRADA DE VEHÍCULO*\nPlaca: ${placa}\nFecha: ${fmt(o.entrada)}${o.tecnico ? '\nTécnico: ' + o.tecnico : ''}\n\n*Instalaciones:*\n${o.install.map(i => '• ' + i).join('\n') || '-'}${listasTxt(o.listasIn)}\n\n*Observaciones:* ${o.obsIn || 'Ninguna'}`;
+  const mins = Math.round((new Date(o.salida) - new Date(o.entrada)) / 60000);
+  const dur = mins >= 60 ? `${Math.floor(mins / 60)} h ${mins % 60} min` : `${mins} min`;
+  return `*RECEPCIÓN RYC*\n*✅ SALIDA DE VEHÍCULO*\nPlaca: ${placa}\nEntrada: ${fmt(o.entrada)}\nSalida: ${fmt(o.salida)}\nTiempo en taller: ${dur}\n\n*Trabajo realizado:*\n${o.install.map(i => '• ' + i).join('\n') || '-'}${listasTxt(o.listas)}\n\n*Observaciones:* ${o.obsOut || 'Ninguna'}`;
+}
+
+// Portada con logo + "RECEPCIÓN RYC": se envía como primera imagen (un texto de WhatsApp no puede llevar logo)
+// Primero busca logo.png junto al index.html; si no, usa el logo del sitio (requiere permitir CORS)
+const LOGOS = ['logo.png', 'https://ryc-soluciones-nicaragua.com/imagenes/cropped-cropped-logo-editable-192x192.png'];
+let logoImg;
+async function cargarLogo() {
+  if (logoImg !== undefined) return logoImg;
+  for (const src of LOGOS) {
+    const im = await new Promise(res => { const i = new Image(); i.crossOrigin = 'anonymous'; i.onload = () => res(i); i.onerror = () => res(null); i.src = src; });
+    if (im) return (logoImg = im);
+  }
+  return (logoImg = null);
+}
+async function portada(titulo, fecha) {
+  try {
+    const logo = await cargarLogo(), c = document.createElement('canvas'), x = c.getContext('2d');
+    c.width = 1000; c.height = 420;
+    x.fillStyle = '#fff'; x.fillRect(0, 0, 1000, 420);
+    x.fillStyle = '#111'; x.fillRect(0, 0, 1000, 14);
+    let tx = 60;
+    if (logo) { x.drawImage(logo, 60, 90, 240, 240); tx = 340; }
+    x.fillStyle = '#111'; x.font = 'bold 64px sans-serif'; x.fillText('RECEPCIÓN RYC', tx, 190);
+    x.fillStyle = '#0d6efd'; x.font = 'bold 42px sans-serif'; x.fillText(titulo, tx, 260);
+    x.fillStyle = '#555'; x.font = '32px sans-serif'; x.fillText(fecha, tx, 315);
+    return c.toDataURL('image/jpeg', 0.9);
+  } catch (e) { return null; }
+}
+
+async function enviar(id, tipo) {
+  const o = orders.find(x => x.id === id), texto = mensaje(o, tipo), ent = tipo === 'entrada';
+  const imgs = [];
+  const pt = await portada(ent ? 'ENTRADA DE VEHÍCULO' : 'SALIDA DE VEHÍCULO', fmt(ent ? o.entrada : o.salida));
+  if (pt) imgs.push(['portada', pt]);
+  if (o.placaFoto) imgs.push(['placa', o.placaFoto]);
+  ((ent ? o.listasIn : o.listas) || []).forEach(s => s.fotos.forEach(f => imgs.push([s.t, f])));
+  ((ent ? o.fotosIn : o.fotosOut) || []).forEach(f => imgs.push(['fotos', f])); // órdenes anteriores a los grupos
+  try {
+    const files = await Promise.all(imgs.map(async ([n, d], i) =>
+      new File([await (await fetch(d)).blob()], `${tipo}-${i + 1}-${n.replace(/[^a-zA-Z0-9]+/g, '-')}.jpg`, { type: 'image/jpeg' })));
+    if (navigator.canShare && navigator.canShare({ files })) {
+      await navigator.share({ text: texto, files });
+      return lista();
+    }
+  } catch (e) { if (e.name === 'AbortError') return lista(); }
+  window.open(`https://wa.me/${NUM}?text=${encodeURIComponent(texto)}`, '_blank'); // respaldo en PC
+  lista();
+}
+
+/* ---------- Inicio ---------- */
+(async () => {
+  orders = (await kvGet('orders')) || JSON.parse(localStorage.getItem('orders') || '[]');
+  cargarLogo();
+  await limpiar();
+  draft = await kvGet('draft');
+  draft ? renderForm() : lista();
+  setInterval(async () => { if (await limpiar() && !draft) lista(); }, 600000);
+})();
+</script>
+</body>
+</html>
